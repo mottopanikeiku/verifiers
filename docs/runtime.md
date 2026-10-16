@@ -1,57 +1,19 @@
 # Runtime
 
-A `Runtime` provides command and file access with immutable user, `HOME`, and
-environment bindings. Task and harness hooks receive it as `runtime: vf.Runtime`.
-`runtime.with_user(...)` and `runtime.with_env(...)` return independent views of
-the same resource; existing views keep their bindings. Working directory comes
-from the runtime config.
+A `Runtime` provides command and file access inside a sandbox with immutable user, `HOME`, and environment bindings. Task and harness hooks receive it as `runtime: vf.Runtime`, while configuration fields such as `agent.runtime` describe the runtime policy used to provision the sandbox (see [Runtimes](runtimes.md) for backend capabilities, resources, and network rules).
 
-An internal `RuntimeBackend` holds provider state and owns resource operations,
-including startup, network policy, and teardown. `backend.bind()` creates an execution view without provisioning a resource.
-Views share that backend and its caches. `runtime.backend` exposes it for explicit infrastructure operations;
-ordinary task hooks only need the execution view. A view is not an isolation
-boundary: backend permissions enforce the selected user.
+Calling `runtime.with_user(...)` or `runtime.with_env(...)` returns a new view over the same underlying resource without mutating existing views. Trusted task setup and grading use the default-user view, while agent execution and colocated tools use the task's `agent_user` view. Note that a view is an execution handle rather than a security boundary: user isolation is enforced by OS permissions inside the container backend.
 
-`Agent.provision()` lends a runtime whose owning context controls cleanup.
-Trusted task setup and grading use the default-user view; agent execution and
-colocated tools use the task's agent-user view. No shared user or environment
-state is mutated when deriving a view.
-
-Use `runtime` (or a role-prefixed name such as `agent_runtime`) for execution
-views, and `backend` (such as `harness_backend`) for lifecycle owners. Provider
-implementations are named `DockerBackend`, `PrimeBackend`, and so on. Configuration
-fields such as `agent.runtime` continue to describe runtime policy.
+Under the hood, a `RuntimeBackend` (such as `DockerBackend` or `PrimeBackend`) owns the provider lifecycle, including container startup, network policy, and teardown. Calling `backend.bind()` creates a `Runtime` view without provisioning a new resource, and `runtime.backend` exposes the backend when explicit infrastructure operations are needed. `Agent.provision()` lends a runtime whose cleanup remains owned by the caller's context.
 
 ## Deployment and services
 
-A `Deployment` coordinates the execution resources for one rollout attempt:
-provisioning, placement, connectivity, and cleanup of the harness environment,
-task workspace, supporting services, and fresh verification targets. Backends
-implement operations on each resource; the rollout controls the agent's execution.
-Borrowed resources remain owned by the context that supplied them.
+A `Deployment` coordinates all execution resources for a single rollout attempt: provisioning, placement, connectivity, and cleanup of the harness environment, the task workspace, supporting sidecar services, and fresh verification targets.
 
-The **workspace** is the execution environment where task commands run and task
-files live. `deployment.workspace` returns a `Runtime`; workspace names a
-role, not a separate resource type or just a working directory.
-`agent.deployment.mode = "colocated"` places the harness and tools in that workspace.
+The **workspace** (`deployment.workspace`) is the `Runtime` where task commands run and task files live; setting `agent.deployment.mode = "colocated"` places the harness and colocated tools inside that same workspace.
 
-**Compose services** are the named containers in a task's Docker Compose file.
-A task returns an optional `ComposeSpec` from `deployment_spec()` to describe this
-setup and select its workspace service. For example, in a task with `app` and
-`postgres` services, `app` can be the workspace while `postgres` runs alongside it.
-Without a Compose specification, the deployment manages a single runtime.
+When a task defines **Compose services** by returning a `ComposeSpec` from `deployment_spec()`, the deployment brings up the multi-container stack and exposes the designated main service as `deployment.workspace` (for example, running `app` as the workspace while a `postgres` sidecar runs alongside it). Without a `ComposeSpec`, the deployment manages a single runtime.
 
-Task hooks can receive `deployment` and use `deployment.target(name)` to access a
-named service through a runtime view. A task tool server can run in a named service
-(`ToolsetConfig.service`, Compose on a Prime or Modal VM); the harness reaches it over
-the Compose network by the service's name, so the server can front services the
-workspace cannot reach. `finalize_services()` collects sidecar evidence
-before verification. See [Harbor's Compose support](harbor.md#docker-compose) for
-provider details. Local Docker Compose requires
-`agent.deployment.trust_compose = true` because task-authored Compose can access
-host files and Docker privileges.
+Task hooks can request `deployment` by parameter name and call `deployment.target(name)` to get a `Runtime` view for a specific named service. A task tool server can also run inside a named Compose service (`ToolsetConfig.service`, on a Prime or Modal VM); the harness reaches it over the Compose network by the service's name, so the tool server can front internal services that the workspace cannot reach directly. `finalize_services()` collects sidecar artifacts before isolated verification. See [Harbor's Docker Compose support](harbor.md#docker-compose) for provider requirements; on local Docker, Compose tasks require `agent.deployment.trust_compose = true` because task-authored Compose files can mount host paths and request Docker privileges.
 
-For model-free validation of an isolated task, finalize the submission and collect
-its artifacts, then call `vf.grade_submission(task, trace, runtime)`. This uses the
-task's normal grader, verifier image, timeouts, and retries without taking ownership
-of the supplied solver runtime.
+To validate an isolated task without calling a model, finalize the submission, collect its artifacts, and call `vf.grade_submission(task, trace, runtime)`. This runs the task's normal grader, verifier image, timeouts, and retries in a fresh verification target without taking ownership of the supplied solver runtime.
